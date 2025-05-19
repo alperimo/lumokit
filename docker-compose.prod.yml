@@ -1,0 +1,60 @@
+services:
+  backend:
+    build:
+      context: ./.
+      dockerfile: Dockerfile.prod
+    container_name: lumokit_backend
+    env_file:
+      - ./.env
+    ports:
+      - "80:80"
+    volumes:
+      - ./src:/app/
+      - work_dir:/app/data
+    # Dynamic command based on DEPLOYMENT_LEVEL
+    command: >
+      bash -c "if [ \"$$DEPLOYMENT_LEVEL\" = \"dev\" ]; then
+        uvicorn main:app --host=0.0.0.0 --port=80 --log-level=warning --workers 4 --reload;
+      else
+        uvicorn main:app --host=0.0.0.0 --port=80 --log-level=warning --workers 4;
+      fi"
+    restart: on-failure
+    networks:
+      - default
+    deploy:
+      resources:
+        limits:
+          cpus: '2.5'
+          memory: '8G'
+        reservations:
+          cpus: '1.5'
+          memory: '4G'
+  postgres:
+    image: pgvector/pgvector:0.7.0-pg16
+    container_name: lumokit_postgres
+    ports:
+      - 5432:5432
+    env_file:
+      - ./.env
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    restart: on-failure
+    networks:
+      - default
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: '4G'
+        reservations:
+          cpus: '0.5'
+          memory: '2G'
+    
+    shm_size: '1g'
+
+volumes:
+  pgdata:
+  work_dir:
+
+networks:
+  default:
