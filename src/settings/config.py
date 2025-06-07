@@ -43,6 +43,9 @@ class CONFIG:
     # OPENROUTER API
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 
+    # INFYR API
+    INFYR_API_KEY: str = os.getenv("INFYR_API_KEY", "")
+
     ##### TOOLKIT APIS #####
 
     # BIRDEYE - Used for pro membership verification, chat wallet evaluation, etc.

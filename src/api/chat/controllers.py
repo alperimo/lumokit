@@ -6,6 +6,7 @@ import sys
 import traceback
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterable, Dict, List, Optional
+import aiohttp
 
 import tiktoken
 from fastapi.responses import StreamingResponse
@@ -253,11 +254,12 @@ async def process_chat_request(chat_request: ChatRequest, db: Session):
             f"[LUMOKIT] User {chat_request.public_key} pro status: {is_pro_user}"
         )
 
-        # Validate model selection - free users can only use gpt-4.1-mini
+        # Validate model selection - free users can only use gpt-4.1-mini and lumo models
         if (
             not is_pro_user
             and chat_request.model_name
             and chat_request.model_name != "gpt-4.1-mini"
+            and not chat_request.model_name.startswith("lumo-")
         ):
             logger.warning(
                 f"[LUMOKIT] Free user {chat_request.public_key} attempted to use model {chat_request.model_name}"
@@ -267,7 +269,7 @@ async def process_chat_request(chat_request: ChatRequest, db: Session):
                     [
                         json.dumps(
                             {
-                                "error": "Free users can only use the default gpt-4.1-mini model. Upgrade to Pro for access to additional models."
+                                "error": "Free users can only use the default gpt-4.1-mini model or Lumo models. Upgrade to Pro for access to additional models."
                             }
                         )
                     ]
@@ -588,6 +590,23 @@ async def process_chat_request(chat_request: ChatRequest, db: Session):
                             streaming=True,
                             callbacks=[stream_handler],
                         )
+                    elif model_name.startswith("lumo-"):
+                        # For Lumo models, use Infyr API endpoint (OpenAI compatible)
+                        logger.info(
+                            f"[LUMOKIT] Using Infyr endpoint for Lumo model {model_name}"
+                        )
+                        chat = ChatOpenAI(
+                            model_name=model_name,
+                            temperature=temperature,
+                            streaming=True,
+                            callbacks=[stream_handler],
+                            max_tokens=4096,
+                            base_url="https://api.infyr.ai/v1",
+                            api_key=CONFIG.INFYR_API_KEY,
+                        )
+                        # Override tools to be empty for Lumo models
+                        tools = []
+                        logger.info(f"[LUMOKIT] Disabled all tools for Lumo model {model_name}")
                     else:
                         # For non-GPT models (like Anthropic Claude), use OpenRouter
                         logger.info(
@@ -604,74 +623,113 @@ async def process_chat_request(chat_request: ChatRequest, db: Session):
                         )
 
                     # Create the prompt template for the agent
-                    prompt = ChatPromptTemplate.from_messages(
-                        [
-                            ("system", system_message),
-                            MessagesPlaceholder(variable_name="chat_history"),
-                            ("human", "{input}"),
-                            MessagesPlaceholder(variable_name="agent_scratchpad"),
-                        ]
-                    )
+                    # For Lumo models, use simpler prompt without tools
+                    if model_name.startswith("lumo-"):
+                        prompt = ChatPromptTemplate.from_messages(
+                            [
+                                ("system", base_system_message),
+                                MessagesPlaceholder(variable_name="chat_history"),
+                                ("human", "{input}"),
+                            ]
+                        )
+                        
+                        # For Lumo models, directly use the chat model without agent
+                        # Build message history for direct chat
+                        chat_history = []
+                        
+                        # Add previous messages from conversation history
+                        for prev_req in conversation_history[:-1]:
+                            if prev_req.message:
+                                chat_history.append(HumanMessage(content=prev_req.message))
+                            if prev_req.response:
+                                chat_history.append(AIMessage(content=prev_req.response))
+                        
+                        # Count input tokens
+                        input_token_count = count_tokens(base_system_message, model=model_name)
+                        input_token_count += count_tokens(
+                            [msg.content for msg in chat_history], model=model_name
+                        )
+                        input_token_count += count_tokens(
+                            chat_request.message, model=model_name
+                        )
+                        
+                        # Build messages for the chat model
+                        messages = [SystemMessage(content=base_system_message)]
+                        messages.extend(chat_history)
+                        messages.append(HumanMessage(content=chat_request.message))
+                        
+                        # Stream response directly from chat model
+                        full_response_text = ""
+                        async for chunk in chat.astream(messages):
+                            if chunk.content:
+                                full_response_text += chunk.content
+                                yield chunk.content
+                        
+                    else:
+                        prompt = ChatPromptTemplate.from_messages(
+                            [
+                                ("system", system_message),
+                                MessagesPlaceholder(variable_name="chat_history"),
+                                ("human", "{input}"),
+                                MessagesPlaceholder(variable_name="agent_scratchpad"),
+                            ]
+                        )
 
-                    # Create the agent
-                    agent = create_openai_tools_agent(chat, tools, prompt)
-                    agent_executor = AgentExecutor(
-                        agent=agent,
-                        tools=tools,
-                        verbose=True,
-                        handle_parsing_errors=True,
-                    )
+                        # Create the agent
+                        agent = create_openai_tools_agent(chat, tools, prompt)
+                        agent_executor = AgentExecutor(
+                            agent=agent,
+                            tools=tools,
+                            verbose=True,
+                            handle_parsing_errors=True,
+                        )
 
-                    # Build message history
-                    chat_history = []
+                        # Build message history
+                        chat_history = []
 
-                    # Add previous messages from conversation history (if any)
-                    # Only include the two most recent exchanges
-                    for prev_req in conversation_history[
-                        :-1
-                    ]:  # Exclude the current request
-                        if prev_req.message:
-                            chat_history.append(HumanMessage(content=prev_req.message))
-                        if prev_req.response:
-                            chat_history.append(AIMessage(content=prev_req.response))
+                        # Add previous messages from conversation history (if any)
+                        # Only include the two most recent exchanges
+                        for prev_req in conversation_history[
+                            :-1
+                        ]:  # Exclude the current request
+                            if prev_req.message:
+                                chat_history.append(HumanMessage(content=prev_req.message))
+                            if prev_req.response:
+                                chat_history.append(AIMessage(content=prev_req.response))
 
-                    # Full response accumulation
-                    full_response_text = ""
+                        # Full response accumulation
+                        full_response_text = ""
 
-                    # Count input tokens
-                    input_token_count = count_tokens(system_message, model=model_name)
-                    input_token_count += count_tokens(
-                        [msg.content for msg in chat_history], model=model_name
-                    )
-                    input_token_count += count_tokens(
-                        chat_request.message, model=model_name
-                    )
+                        # Count input tokens
+                        input_token_count = count_tokens(system_message, model=model_name)
+                        input_token_count += count_tokens(
+                            [msg.content for msg in chat_history], model=model_name
+                        )
+                        input_token_count += count_tokens(
+                            chat_request.message, model=model_name
+                        )
 
-                    # Process the user input with agent using astream_log for granular token streaming
-                    async for log_entry in agent_executor.astream_log(
-                        {
-                            "input": chat_request.message,
-                            "chat_history": chat_history,
-                            "agent_public": chat_request.agent_public,  # Ensure this is used by prompt or remove
-                        },
-                        config={},  # Callbacks are handled by stream_handler on LLM and DebugCaptureCallbackHandler
-                    ):
-                        for op in log_entry.ops:
-                            # Check for tokens streamed from the ChatOpenAI LLM
-                            # The path indicates an addition to the streamed output string list
-                            if (
-                                op["op"] == "add"
-                                and op["path"].startswith("/logs/ChatOpenAI")
-                                and op["path"].endswith("/streamed_output_str/-")
-                            ):
-                                token_chunk = op["value"]
-                                if token_chunk:  # Ensure content is not None or empty
-                                    full_response_text += token_chunk
-                                    yield token_chunk
-                            # You can add more conditions here to log/yield other types of agent events if needed
-                            # For example, tool calls, intermediate steps, etc.
-                            # elif op["op"] == "add" and op["path"].startswith("/logs/"):
-                            #     logger.debug(f"Agent log op: {op}")
+                        # Process the user input with agent using astream_log for granular token streaming
+                        async for log_entry in agent_executor.astream_log(
+                            {
+                                "input": chat_request.message,
+                                "chat_history": chat_history,
+                                "agent_public": chat_request.agent_public,  # Ensure this is used by prompt or remove
+                            },
+                            config={},  # Callbacks are handled by stream_handler on LLM and DebugCaptureCallbackHandler
+                        ):
+                            for op in log_entry.ops:
+                                # Check for tokens streamed from the ChatOpenAI LLM
+                                # The path indicates an addition to the streamed output string list
+                                if (
+                                    op["op"] == "add"
+                                    and op["path"].startswith("/logs/ChatOpenAI")
+                                    and op["path"].endswith("/streamed_output_str/-")
+                                ):
+                                    token_chunk = op["value"]
+                                    if token_chunk:  # Ensure content is not None or empty
+                                        full_response_text += token_chunk
+                                        yield token_chunk
 
                     # The full_response_text is now accumulated from streamed log chunks
                     # agent_output is used for token counting and final DB save.
@@ -697,6 +755,10 @@ async def process_chat_request(chat_request: ChatRequest, db: Session):
                         request.input_token_count = input_token_count
                         request.output_token_count = output_token_count
                         request.total_token_count = total_token_count
+
+                    # For Lumo models, manually call the end callback
+                    if model_name.startswith("lumo-"):
+                        stream_handler.on_llm_end(None)
 
                     # Streaming to the client is already done by the `yield` in the astream_log loop.
                     # The StreamingCallback.on_llm_end handles its version of the final response.

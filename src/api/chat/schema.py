@@ -15,6 +15,9 @@ AllowedModelName = Literal[
     "anthropic/claude-3.7-sonnet",
     "google/gemini-2.5-pro-preview",
     "meta-llama/llama-4-maverick",
+    "lumo-70b",
+    "lumo-8b",
+    "lumo-deepseek-8b",
 ]
 
 

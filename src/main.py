@@ -21,7 +21,7 @@ from settings.db import engine, get_db
 
 app = FastAPI(
     title="LumoKit API",
-    version="1.0.0",
+    version="1.1.0",
     summary="A lightweight AI Toolkit Framework offering a multitude of on-chain actions and researching abilities created by Lumo Labs catering to Solana.",
 )
 

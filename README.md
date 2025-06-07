@@ -1,4 +1,4 @@
-<h1 align="center">LumoKit - v1.0.0</h1>
+<h1 align="center">LumoKit - v1.1.0</h1>
 
 <p align="center">
   <img src="https://i.ibb.co/8LJmPRQz/lumo-u.png" alt="LumoKit Logo" width="200"/>
