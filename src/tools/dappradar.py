@@ -231,8 +231,9 @@ class DappRadarGameTrackerTool(BaseTool):
             # Tags
             if tags := game.get('tags'):
                 if tags and len(tags) > 0:
-                    result += f"**Tags**: {', '.join(tags[:5])}\n"  # Limit to first 5 tags
-            
+                    tags_str = [ t if isinstance(t, str) else (t.get("name") or t.get("title") or t.get("slug") or str(t)) for t in tags ]
+                    result += f"**Tags**: {', '.join(tags_str[:5])}\n"  # Limit to first 5 tags
+
             # Social links
             if social_links := game.get('social_links'):
                 if social_links and len(social_links) > 0:
